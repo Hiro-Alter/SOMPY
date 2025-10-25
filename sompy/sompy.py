@@ -309,7 +309,8 @@ class SOM(object):
     def _batchtrain(self, trainlen, radiusin, radiusfin, njob=1, shared_memory=False):
         """
         Entrena el SOM en modo batch y guarda el error de cuantización (QE)
-        y el error topográfico (TE) en cada época para visualizar el proceso de aprendizaje.
+        y el error topográfico (TE) en cada época, acumulando entre las fases
+        rough y finetune para visualizar el proceso completo de aprendizaje.
         """
         radius = np.linspace(radiusin, radiusfin, trainlen)
     
@@ -323,16 +324,22 @@ class SOM(object):
             data = self._data
     
         bmu = None
-    
         fixed_euclidean_x2 = np.einsum('ij,ij->i', data, data)
     
         logging.info(" radius_ini: %f , radius_final: %f, trainlen: %d\n" %
                      (radiusin, radiusfin, trainlen))
     
-        # --- NUEVO: listas para guardar los errores ---
-        self.qerror_history = []
-        self.topo_error_history = []
+        # --- Listas persistentes para registrar el proceso completo ---
+        if not hasattr(self, 'qerror_history') or self.qerror_history is None:
+            self.qerror_history = []
+        if not hasattr(self, 'topo_error_history') or self.topo_error_history is None:
+            self.topo_error_history = []
     
+        # --- Contador global de épocas ---
+        if not hasattr(self, '_train_epoch_counter') or self._train_epoch_counter is None:
+            self._train_epoch_counter = 0
+    
+        # --- Bucle de entrenamiento por época ---
         for i in range(trainlen):
             t1 = time()
             neighborhood = self.neighborhood.calculate(
@@ -340,29 +347,30 @@ class SOM(object):
             bmu = self.find_bmu(data, njb=njob)
             self.codebook.matrix = self.update_codebook_voronoi(data, bmu, neighborhood)
     
-            # Cálculo del error de cuantización
+            # Calcular errores
             qerror = (i + 1, round(time() - t1, 3),
                       np.mean(np.sqrt(bmu[1] + fixed_euclidean_x2)))
-    
-            # Cálculo del error topográfico (nuevo)
             try:
                 te = self.calculate_topographic_error()
             except Exception as e:
                 te = np.nan
                 logging.warning(f"Topographic error failed at epoch {i+1}: {e}")
     
+            # Log de progreso
             logging.info(" epoch: %d ---> elapsed time: %f, QE: %f, TE: %f\n" %
-                         (qerror[0], qerror[1], qerror[2], te))
+                         (self._train_epoch_counter + 1, qerror[1], qerror[2], te))
     
-            # --- NUEVO: guardar los errores en las listas ---
+            # Guardar errores acumulados
             self.qerror_history.append(qerror[2])
             self.topo_error_history.append(te)
+            self._train_epoch_counter += 1
     
-            # Si el error se vuelve NaN, se interrumpe el entrenamiento
+            # Si hay error NaN, salir del entrenamiento
             if np.any(np.isnan(qerror)):
                 logging.info("nan quantization error, exit train\n")
                 break
     
+        # Al finalizar, recalcular BMU y asignarlo
         bmu = self.find_bmu(data, njb=njob)
         bmu[1] = np.sqrt(bmu[1] + fixed_euclidean_x2)
         self._bmu = bmu
