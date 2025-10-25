@@ -306,53 +306,63 @@ class SOM(object):
             
         self._batchtrain(trainlen, radiusin, radiusfin, njob, shared_memory)
 
-    def _batchtrain(self, trainlen, radiusin, radiusfin, njob=1,
-                    shared_memory=False):
+    def _batchtrain(self, trainlen, radiusin, radiusfin, njob=1, shared_memory=False):
+        """
+        Entrena el SOM en modo batch y guarda el error de cuantización (QE)
+        y el error topográfico (TE) en cada época para visualizar el proceso de aprendizaje.
+        """
         radius = np.linspace(radiusin, radiusfin, trainlen)
-
+    
         if shared_memory:
             data = self._data
             data_folder = tempfile.mkdtemp()
             data_name = os.path.join(data_folder, 'data')
             dump(data, data_name)
             data = load(data_name, mmap_mode='r')
-
         else:
             data = self._data
-
+    
         bmu = None
-
-        # X2 is part of euclidean distance (x-y)^2 = x^2 +y^2 - 2xy that we use
-        # for each data row in bmu finding.
-        # Since it is a fixed value we can skip it during bmu finding for each
-        # data point, but later we need it calculate quantification error
+    
         fixed_euclidean_x2 = np.einsum('ij,ij->i', data, data)
-
+    
         logging.info(" radius_ini: %f , radius_final: %f, trainlen: %d\n" %
                      (radiusin, radiusfin, trainlen))
-
+    
+        # --- NUEVO: listas para guardar los errores ---
+        self.qerror_history = []
+        self.topo_error_history = []
+    
         for i in range(trainlen):
             t1 = time()
             neighborhood = self.neighborhood.calculate(
                 self._distance_matrix, radius[i], self.codebook.nnodes)
             bmu = self.find_bmu(data, njb=njob)
-            self.codebook.matrix = self.update_codebook_voronoi(data, bmu,
-                                                                neighborhood)
-
-            #lbugnon: ojo! aca el bmy[1] a veces da negativo, y despues de eso se rompe...hay algo raro ahi
+            self.codebook.matrix = self.update_codebook_voronoi(data, bmu, neighborhood)
+    
+            # Cálculo del error de cuantización
             qerror = (i + 1, round(time() - t1, 3),
-                      np.mean(np.sqrt(bmu[1] + fixed_euclidean_x2))) #lbugnon: ojo aca me tiró un warning, revisar (commit sinc: 965666d3d4d93bcf48e8cef6ea2c41a018c1cb83 )
-            #lbugnon
-            #ipdb.set_trace()
-            #
-            logging.info(
-                " epoch: %d ---> elapsed time:  %f, quantization error: %f\n" %
-                qerror)
+                      np.mean(np.sqrt(bmu[1] + fixed_euclidean_x2)))
+    
+            # Cálculo del error topográfico (nuevo)
+            try:
+                te = self.calculate_topographic_error()
+            except Exception as e:
+                te = np.nan
+                logging.warning(f"Topographic error failed at epoch {i+1}: {e}")
+    
+            logging.info(" epoch: %d ---> elapsed time: %f, QE: %f, TE: %f\n" %
+                         (qerror[0], qerror[1], qerror[2], te))
+    
+            # --- NUEVO: guardar los errores en las listas ---
+            self.qerror_history.append(qerror[2])
+            self.topo_error_history.append(te)
+    
+            # Si el error se vuelve NaN, se interrumpe el entrenamiento
             if np.any(np.isnan(qerror)):
                 logging.info("nan quantization error, exit train\n")
-                
-                #sys.exit("quantization error=nan, exit train")
-
+                break
+    
         bmu = self.find_bmu(data, njb=njob)
         bmu[1] = np.sqrt(bmu[1] + fixed_euclidean_x2)
         self._bmu = bmu
